@@ -1,0 +1,47 @@
+Windows Registry Editor Version 5.00
+
+; TEMPLATE FILE - %INSTALL_DIR% must be substituted with the real install
+; path before this is valid .reg syntax; do not double-click it as-is.
+; The installer (installer/nyra-installer.nsi) writes the equivalent keys
+; directly with the real path substituted, so most users never need this
+; file - it exists as a readable reference / for manual/portable installs.
+;
+; FIXED vs the original: every reference to NyraShell.exe changed to
+; nyra.exe (the actual executable name this project now produces).
+
+[HKEY_CURRENT_USER\Software\Classes\NyraPlayer.Media]
+@="Nyra Player Media File"
+
+[HKEY_CURRENT_USER\Software\Classes\NyraPlayer.Media\DefaultIcon]
+@="\"%INSTALL_DIR%\\nyra.exe\",0"
+
+[HKEY_CURRENT_USER\Software\Classes\NyraPlayer.Media\shell\open\command]
+@="\"%INSTALL_DIR%\\nyra.exe\" \"%1\""
+
+[HKEY_CURRENT_USER\Software\Classes\.mp4\OpenWithProgids]
+"NyraPlayer.Media"=""
+[HKEY_CURRENT_USER\Software\Classes\.mkv\OpenWithProgids]
+"NyraPlayer.Media"=""
+[HKEY_CURRENT_USER\Software\Classes\.avi\OpenWithProgids]
+"NyraPlayer.Media"=""
+[HKEY_CURRENT_USER\Software\Classes\.mov\OpenWithProgids]
+"NyraPlayer.Media"=""
+[HKEY_CURRENT_USER\Software\Classes\.webm\OpenWithProgids]
+"NyraPlayer.Media"=""
+[HKEY_CURRENT_USER\Software\Classes\.ts\OpenWithProgids]
+"NyraPlayer.Media"=""
+
+[HKEY_CURRENT_USER\Software\RegisteredApplications]
+"Nyra Player"="Software\\Nyra Player\\Capabilities"
+
+[HKEY_CURRENT_USER\Software\Nyra Player\Capabilities]
+"ApplicationName"="Nyra Player"
+"ApplicationDescription"="A VLC-derived, power-aware media player"
+
+[HKEY_CURRENT_USER\Software\Nyra Player\Capabilities\FileAssociations]
+".mp4"="NyraPlayer.Media"
+".mkv"="NyraPlayer.Media"
+".avi"="NyraPlayer.Media"
+".mov"="NyraPlayer.Media"
+".webm"="NyraPlayer.Media"
+".ts"="NyraPlayer.Media"
