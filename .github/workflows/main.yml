@@ -1,0 +1,162 @@
+name: Build, test, and package Nyra Player (Windows x64)
+
+# FIXED (this revision): the previous VLC_SDK_URL pointed at a
+# "vlc-3.0.20-win64.7z" file that does not actually exist at that path on
+# get.videolan.org - the download returned a tiny 29KB response (an error/
+# redirect page, not an archive), which 7-Zip then correctly refused to
+# open. VideoLAN publishes Windows builds as .zip (portable) and .exe
+# (installer), not .7z, for this release - switched to the .zip and to
+# PowerShell's built-in Expand-Archive (no need for external 7z at all).
+# Also added a real size/content check right after download so a bad URL
+# fails with a clear message instead of a cryptic archive-tool error.
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      vlc_sdk_url:
+        description: 'URL of the VLC Windows portable zip to build against'
+        required: false
+        default: 'https://get.videolan.org/vlc/3.0.20/win64/vlc-3.0.20-win64.zip'
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      VLC_SDK_URL: ${{ github.event.inputs.vlc_sdk_url || 'https://get.videolan.org/vlc/3.0.20/win64/vlc-3.0.20-win64.zip' }}
+    steps:
+      - name: Checkout Nyra sources
+        uses: actions/checkout@v4
+
+      - name: Install Qt6
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.7.*'
+          arch: 'win64_mingw'
+          host: 'windows'
+          target: 'desktop'
+          modules: ''
+
+      - name: Download VLC Windows package (official, prebuilt, unmodified)
+        shell: pwsh
+        run: |
+          Write-Host "Downloading: $env:VLC_SDK_URL"
+          Invoke-WebRequest -Uri "$env:VLC_SDK_URL" -OutFile vlc.zip -UserAgent "Mozilla/5.0"
+
+          $size = (Get-Item vlc.zip).Length
+          Write-Host "Downloaded file size: $size bytes"
+          if ($size -lt 5MB) {
+            Write-Host "----- First 500 bytes of the downloaded file (likely an error page, not an archive) -----"
+            Get-Content vlc.zip -TotalCount 20
+            Write-Error "Downloaded file is far too small ($size bytes) to be the real VLC package. The URL is wrong or VideoLAN changed their layout - check https://get.videolan.org/vlc/ manually and update vlc_sdk_url."
+            exit 1
+          }
+
+          Expand-Archive -Path vlc.zip -DestinationPath vlc-extract -Force
+          $vlcDir = Get-ChildItem vlc-extract -Directory | Select-Object -First 1
+          if (-not $vlcDir) {
+            Write-Error "vlc.zip extracted but no top-level folder was found inside it - archive layout is not what this workflow expects."
+            exit 1
+          }
+          Move-Item $vlcDir.FullName vlc-sdk
+
+          # Normalize: the official package ships public headers/import libs
+          # under sdk/include and sdk/lib - flatten those to <root>/include
+          # and <root>/lib so -DVLC_SDK_DIR points at one consistent layout.
+          if (Test-Path vlc-sdk/sdk) {
+            Copy-Item vlc-sdk/sdk/include vlc-sdk/include -Recurse -Force
+            Copy-Item vlc-sdk/sdk/lib vlc-sdk/lib -Recurse -Force
+          }
+          Write-Host "----- vlc-sdk contents -----"
+          Get-ChildItem vlc-sdk
+
+      - name: Verify VLC SDK layout
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "vlc-sdk/include/vlc/vlc.h")) {
+            Write-Host "----- vlc-sdk top-level contents (for debugging) -----"
+            Get-ChildItem vlc-sdk -Recurse -Depth 1
+            Write-Error "vlc-sdk/include/vlc/vlc.h not found. This VLC release's zip may not bundle the sdk/ folder (older/newer releases have varied on this) - if so, VLC must be built from source instead (see BUILD.md Option B) and VLC_SDK_DIR pointed at that build's sdk output."
+            exit 1
+          }
+          if (-not (Test-Path "vlc-sdk/plugins")) {
+            Write-Error "vlc-sdk/plugins/ not found - packaged nyra.exe would have no codecs at runtime."
+            exit 1
+          }
+
+      - name: Configure (CMake)
+        shell: pwsh
+        run: |
+          cmake -S . -B build -G "MinGW Makefiles" `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DVLC_SDK_DIR="${{ github.workspace }}/vlc-sdk"
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build build --config Release -j
+
+      - name: Verify nyra.exe was actually produced
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path build -Recurse -Filter "nyra.exe" | Select-Object -First 1
+          if (-not $exe) {
+            Write-Error "nyra.exe was not produced by the build - failing rather than uploading nothing useful."
+            exit 1
+          }
+          echo "NYRA_EXE=$($exe.FullName)" >> $env:GITHUB_ENV
+          echo "Found: $($exe.FullName)"
+
+      - name: Install / package (nyra.exe + Qt DLLs + VLC DLLs + plugins)
+        shell: pwsh
+        run: |
+          cmake --install build --config Release --prefix dist/Nyra
+
+      - name: Verify the packaged folder is actually runnable-looking
+        shell: pwsh
+        run: |
+          $dist = "dist/Nyra"
+          $required = @("nyra.exe", "libvlc.dll", "Qt6Core.dll", "Qt6Widgets.dll", "Qt6Gui.dll")
+          $missing = @()
+          foreach ($f in $required) {
+            if (-not (Test-Path (Join-Path $dist $f))) { $missing += $f }
+          }
+          if (-not (Test-Path (Join-Path $dist "plugins"))) { $missing += "plugins/" }
+          if ($missing.Count -gt 0) {
+            Write-Error "Missing required packaged files: $($missing -join ', ')"
+            exit 1
+          }
+          Write-Host "All required files present in $dist"
+
+      - name: Headless smoke test (process launches and exits cleanly)
+        shell: pwsh
+        run: |
+          $exe = $env:NYRA_EXE
+          $p = Start-Process -FilePath $exe -ArgumentList "--version" -PassThru -Wait -NoNewWindow
+          if ($p.ExitCode -ne 0) {
+            Write-Error "nyra.exe --version exited with code $($p.ExitCode)"
+            exit 1
+          }
+          Write-Host "nyra.exe launched and exited cleanly."
+
+      - name: Package portable zip
+        shell: pwsh
+        run: Compress-Archive -Path "dist/Nyra/*" -DestinationPath "Nyra-Player-Windows-x64.zip"
+
+      - name: Build NSIS installer
+        shell: pwsh
+        run: |
+          choco install nsis -y --no-progress
+          & "C:\Program Files (x86)\NSIS\makensis.exe" `
+            /DNYRA_BUILD_DIR="dist\Nyra" `
+            installer\nyra-installer.nsi
+        continue-on-error: true # installer is a nice-to-have; the portable zip above is the guaranteed artifact
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nyra-player-win64
+          path: |
+            Nyra-Player-Windows-x64.zip
+            installer/Nyra-Player-Setup-Windows-x64.exe
+          if-no-files-found: warn
