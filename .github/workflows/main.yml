@@ -1,14 +1,15 @@
 name: Build, test, and package Nyra Player (Windows x64)
 
-# FIXED (this revision): the previous VLC_SDK_URL pointed at a
-# "vlc-3.0.20-win64.7z" file that does not actually exist at that path on
-# get.videolan.org - the download returned a tiny 29KB response (an error/
-# redirect page, not an archive), which 7-Zip then correctly refused to
-# open. VideoLAN publishes Windows builds as .zip (portable) and .exe
-# (installer), not .7z, for this release - switched to the .zip and to
-# PowerShell's built-in Expand-Archive (no need for external 7z at all).
-# Also added a real size/content check right after download so a bad URL
-# fails with a clear message instead of a cryptic archive-tool error.
+# FIXED (this revision): get.videolan.org does not serve the file directly -
+# it returns a small HTML page containing an HTML meta-refresh redirect
+# ("<meta http-equiv=refresh content='5;URL=https://mirrors.<host>/...'>")
+# pointing at whichever mirror it picked for the requester. That is a
+# browser-level redirect, not an HTTP 3xx redirect, so Invoke-WebRequest
+# does not follow it automatically - it just saved that small HTML page as
+# vlc.zip, which is why extraction failed both times before. This revision
+# downloads, detects "this is HTML, not a zip", parses the real mirror URL
+# out of the meta-refresh tag, and re-downloads from there - looping a
+# couple of times in case a mirror itself redirects again.
 
 on:
   push:
@@ -38,18 +39,56 @@ jobs:
           target: 'desktop'
           modules: ''
 
-      - name: Download VLC Windows package (official, prebuilt, unmodified)
+      - name: Download VLC Windows package (following VideoLAN's mirror redirect)
         shell: pwsh
         run: |
-          Write-Host "Downloading: $env:VLC_SDK_URL"
-          Invoke-WebRequest -Uri "$env:VLC_SDK_URL" -OutFile vlc.zip -UserAgent "Mozilla/5.0"
+          function Test-IsZip($path) {
+            $fs = [System.IO.File]::OpenRead($path)
+            try {
+              $b1 = $fs.ReadByte(); $b2 = $fs.ReadByte()
+            } finally { $fs.Close() }
+            return ($b1 -eq 0x50 -and $b2 -eq 0x4B)   # 'PK' zip signature
+          }
+
+          $url = $env:VLC_SDK_URL
+          $maxHops = 4
+          $hop = 0
+          $ok = $false
+
+          while ($hop -lt $maxHops) {
+            $hop++
+            Write-Host "Attempt $hop - downloading: $url"
+            Invoke-WebRequest -Uri $url -OutFile vlc.zip -UserAgent "Mozilla/5.0" -MaximumRedirection 5
+
+            if (Test-IsZip "vlc.zip") {
+              Write-Host "Got a real zip after $hop attempt(s)."
+              $ok = $true
+              break
+            }
+
+            # Not a zip - it's VideoLAN's small HTML meta-refresh redirect
+            # page. Pull the real mirror URL out of it and try again.
+            $html = Get-Content vlc.zip -Raw
+            $pattern = 'URL=[''"]?([^''"\s>]+)'
+            $m = [regex]::Match($html, $pattern, 'IgnoreCase')
+            if (-not $m.Success) {
+              Write-Host "----- Response was not a zip and had no meta-refresh redirect - first 500 bytes: -----"
+              Get-Content vlc.zip -TotalCount 20
+              Write-Error "Could not resolve a real VLC archive from $url."
+              exit 1
+            }
+            $url = $m.Groups[1].Value
+          }
+
+          if (-not $ok) {
+            Write-Error "Followed $maxHops redirects and still never got a real zip file. Last URL tried: $url"
+            exit 1
+          }
 
           $size = (Get-Item vlc.zip).Length
-          Write-Host "Downloaded file size: $size bytes"
+          Write-Host "Final vlc.zip size: $size bytes"
           if ($size -lt 5MB) {
-            Write-Host "----- First 500 bytes of the downloaded file (likely an error page, not an archive) -----"
-            Get-Content vlc.zip -TotalCount 20
-            Write-Error "Downloaded file is far too small ($size bytes) to be the real VLC package. The URL is wrong or VideoLAN changed their layout - check https://get.videolan.org/vlc/ manually and update vlc_sdk_url."
+            Write-Error "vlc.zip looks like a zip signature but is far too small ($size bytes) to be the real VLC package - something is still off with the mirror."
             exit 1
           }
 
@@ -77,7 +116,7 @@ jobs:
           if (-not (Test-Path "vlc-sdk/include/vlc/vlc.h")) {
             Write-Host "----- vlc-sdk top-level contents (for debugging) -----"
             Get-ChildItem vlc-sdk -Recurse -Depth 1
-            Write-Error "vlc-sdk/include/vlc/vlc.h not found. This VLC release's zip may not bundle the sdk/ folder (older/newer releases have varied on this) - if so, VLC must be built from source instead (see BUILD.md Option B) and VLC_SDK_DIR pointed at that build's sdk output."
+            Write-Error "vlc-sdk/include/vlc/vlc.h not found. This VLC release's zip may not bundle the sdk/ folder - if so, VLC must be built from source instead (see BUILD.md Option B) and VLC_SDK_DIR pointed at that build's sdk output."
             exit 1
           }
           if (-not (Test-Path "vlc-sdk/plugins")) {
